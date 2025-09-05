@@ -9,7 +9,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import pytz
 import random
-import time
+import time # Import the time module
+import traceback # Import traceback for detailed error logging
 
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO)
@@ -23,21 +24,38 @@ api_cache = {
 }
 CACHE_DURATION = timedelta(minutes=5)
 
-# --- Helper Functions (No Changes Here) ---
+# --- Helper Functions ---
+
+def safe_format_float(value):
+    """Safely formats a value to a float string or returns 'N/A'."""
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):.2f}"
+    except (ValueError, TypeError):
+        return "N/A"
 
 def format_volume(volume):
     if volume is None: return "N/A"
-    if volume >= 1_000_000: return f"{volume / 1_000_000:.2f}M"
-    if volume >= 1_000: return f"{volume / 1_000:.2f}K"
-    return str(volume)
+    try:
+        volume = float(volume)
+        if volume >= 1_000_000: return f"{volume / 1_000_000:.2f}M"
+        if volume >= 1_000: return f"{volume / 1_000:.2f}K"
+        return str(int(volume))
+    except (ValueError, TypeError):
+        return "N/A"
 
 def get_rank(rsi):
     if rsi is None: return 'N/A'
-    if rsi > 75: return 'Excellent'
-    if rsi > 65: return 'Very Good'
-    if rsi > 55: return 'Good'
-    return 'Fair'
-    
+    try:
+        rsi = float(rsi)
+        if rsi > 75: return 'Excellent'
+        if rsi > 65: return 'Very Good'
+        if rsi > 55: return 'Good'
+        return 'Fair'
+    except (ValueError, TypeError):
+        return 'N/A'
+
 def get_risk_note():
     notes = [
         {'title': 'Profit-Taking Risk', 'reason': 'High RSI suggests a pullback as investors lock in gains.'},
@@ -62,7 +80,7 @@ def get_dynamic_tickers():
         logging.error(f"Failed to scrape tickers, using fallback list: {e}")
         return ['NVDA', 'TSLA', 'AAPL', 'SMCI', 'AVGO', 'GME', 'PLTR', 'AMD', 'LLY', 'DELL']
 
-# --- Market Status Endpoint (No Changes Here) ---
+# --- Market Status Endpoint ---
 @app.route('/api/market-status')
 def get_market_status():
     try:
@@ -80,7 +98,7 @@ def get_market_status():
         logging.error(f"Could not fetch market status: {e}")
         return jsonify({"status": "Market status is currently unavailable", "time": ""}), 500
 
-# --- Main API Endpoint (Now with Defensive Data Handling) ---
+# --- Main API Endpoint ---
 @app.route('/api/top-gainers')
 def get_top_gainers_data():
     global api_cache
@@ -96,98 +114,68 @@ def get_top_gainers_data():
         all_data = []
 
         for symbol in active_tickers:
+            logging.info(f"--- Processing symbol: {symbol} ---")
             try:
-                logging.info(f"--- Processing symbol: {symbol} ---")
-                
-                ticker_obj = yf.Ticker(symbol)
-                info = ticker_obj.info
-                
+                # Fetch data for a single ticker
+                ticker_data = yf.Ticker(symbol)
+                info = ticker_data.info
+                hist = ticker_data.history(period="3mo")
+
+                if hist.empty or not info or 'regularMarketPrice' not in info:
+                    logging.warning(f"Skipping {symbol}: History or info data was empty or invalid.")
+                    continue
+
                 regular_price = info.get('regularMarketPrice') or info.get('currentPrice') or info.get('previousClose')
-                
-                if not info or not regular_price:
-                    logging.warning(f"Skipping {symbol}: Missing critical price data in '.info'.")
+                prev_close = info.get('previousClose')
+
+                if regular_price is None or prev_close is None:
+                    logging.warning(f"Skipping {symbol}: Missing critical price data.")
                     continue
 
-                hist = ticker_obj.history(period="3mo")
-                if hist.empty:
-                    logging.warning(f"Skipping {symbol}: History data was empty.")
-                    continue
-
-                market_state = info.get('marketState', 'UNKNOWN').upper()
-                price_type = "REGULAR"
-                
-                prev_close = info.get('previousClose', 1)
                 change = regular_price - prev_close
-                change_percent = (change / prev_close) * 100 if prev_close else 0
-
-                display_price = regular_price
-                market_change_str = ""
-
-                if market_state in ["PRE", "PREPRE"] and info.get('preMarketPrice'):
-                    display_price = info['preMarketPrice']
-                    price_type = "PRE"
-                    pre_market_change = display_price - regular_price
-                    pre_market_percent = (pre_market_change / regular_price) * 100 if regular_price else 0
-                    market_change_str = f" ({pre_market_change:+.2f}, {pre_market_percent:+.2f}%)"
-                elif market_state in ["POST", "POSTPOST", "CLOSED"] and info.get('postMarketPrice'):
-                    display_price = info['postMarketPrice']
-                    price_type = "POST"
-                    post_market_change = display_price - regular_price
-                    post_market_percent = (post_market_change / regular_price) * 100 if regular_price else 0
-                    market_change_str = f" ({post_market_change:+.2f}, {post_market_percent:+.2f}%)"
+                if change <= 0:
+                    logging.info(f"Skipping {symbol}: Not a gainer (change: {change:.2f}).")
+                    continue
                 
+                change_percent = (change / prev_close) * 100
+
+                # --- Calculate indicators ---
                 hist.ta.ema(length=10, append=True)
                 hist.ta.ema(length=50, append=True)
                 hist.ta.rsi(length=14, append=True)
                 hist.ta.macd(fast=12, slow=26, signal=9, append=True)
                 hist.ta.atr(length=14, append=True)
                 latest = hist.iloc[-1]
-
-                # --- NEW: Safely get all technical indicator values ---
-                rsi = latest.get('RSI_14')
-                macd_hist = latest.get('MACDh_12_26_9')
-                ema_10 = latest.get('EMA_10')
-                ema_50 = latest.get('EMA_50')
-                atr = latest.get('ATRr_14')
                 
                 stock_data = {
                     "ticker": symbol,
-                    "price": f"{display_price:.2f}",
-                    "priceType": price_type,
-                    "marketChangeStr": market_change_str,
+                    "price": safe_format_float(info.get('regularMarketPrice')),
                     "change": f"{change:+.2f}",
                     "changePercent": f"{change_percent:+.2f}%",
-                    "ohl": f"{info.get('open', 0):.2f}/{info.get('dayHigh', 0):.2f}/{info.get('dayLow', 0):.2f}",
-                    "volume": format_volume(info.get('volume', 0)),
-                    # --- NEW: Check each value before formatting to prevent crashes ---
-                    "rsi": f"{rsi:.2f}" if rsi is not None else "N/A",
-                    "macdHist": f"{macd_hist:.2f}" if macd_hist is not None else "N/A",
-                    "ema_10_50": f"{ema_10:.2f} / {ema_50:.2f}" if ema_10 is not None and ema_50 is not None else "N/A",
-                    "rank": get_rank(rsi),
-                    "action": "Consider" if get_rank(rsi) in ['Good', 'Fair'] else "Watch",
-                    "riskNotes": get_risk_note(),
-                    "atrStop": f"{(regular_price - (2 * atr)):.2f}" if atr is not None else "N/A",
-                    "profitTarget": f"{(regular_price + (2 * atr)):.2f} - {(regular_price + (3 * atr)):.2f}" if atr is not None else "N/A"
+                    "volume": format_volume(info.get('volume')),
+                    "rsi": safe_format_float(latest.get('RSI_14')),
+                    "rank": get_rank(latest.get('RSI_14'))
                 }
                 all_data.append(stock_data)
                 logging.info(f"Successfully processed and added {symbol}.")
-            except Exception as e:
-                logging.error(f"An unexpected error occurred for {symbol}: {e}")
+
+            except Exception:
+                logging.error(f"An unexpected error occurred for {symbol}:")
+                logging.error(traceback.format_exc()) # Log the full error
             
-            time.sleep(0.5)
+            # --- IMPORTANT: Wait for 1 second to avoid being rate-limited ---
+            logging.info("Waiting for 1 second...")
+            time.sleep(1)
         
-        logging.info(f"Finished processing. Found {len(all_data)} stocks to return.")
-        top_10_stocks = sorted(all_data, key=lambda x: float(x['change']), reverse=True)[:10]
+        top_10_gainers = sorted(all_data, key=lambda x: float(x['change']), reverse=True)[:10]
 
-        api_cache["data"] = top_10_stocks
+        api_cache["data"] = top_10_gainers
         api_cache["last_updated"] = datetime.utcnow()
-
-        return jsonify(top_10_stocks)
+        return jsonify(top_10_gainers)
 
     except Exception as e:
-        logging.error(f"A critical error occurred in get_top_gainers_data: {e}")
+        logging.error(f"A major error occurred in get_top_gainers_data: {e}")
         if api_cache["data"]:
-            logging.warning("Returning stale data due to a critical error.")
             return jsonify(api_cache["data"])
         return jsonify({"error": "Could not fetch data and no cache is available."}), 500
 
