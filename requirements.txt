@@ -1,0 +1,9 @@
+Flask
+Flask-Cors
+yfinance
+pandas
+pandas-ta
+requests
+beautifulsoup4
+pytz
+gunicorn
