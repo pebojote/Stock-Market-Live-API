@@ -18,5 +18,5 @@ COPY . .
 EXPOSE 10000
 
 # Command to run the application using Gunicorn
-# Render provides the $PORT variable, so we bind to 0.0.0.0:$PORT
-CMD ["gunicorn", "--workers", "4", "--bind", "0.0.0.0:${PORT}", "main:app"]
+# This shell form allows the ${PORT} variable to be expanded correctly.
+CMD gunicorn --workers 4 --bind 0.0.0.0:${PORT} main:app
