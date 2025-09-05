@@ -6,13 +6,21 @@ import pandas_ta as ta
 import logging
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
+import random
 
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 CORS(app)
+
+# --- Cache Setup ---
+api_cache = {
+    "data": None,
+    "last_updated": None
+}
+CACHE_DURATION = timedelta(minutes=5)
 
 # --- Helper Functions ---
 
@@ -30,11 +38,10 @@ def get_rank(rsi):
     
 def get_risk_note():
     notes = [
-        {'title': 'Profit-Taking', 'reason': 'High RSI suggests a pullback as investors lock in gains.'},
-        {'title': 'Overextended Technicals', 'reason': 'Price has moved too far, too fast, risking a reversal.'},
-        {'title': 'High Expectations', 'reason': 'Priced for perfection; any disappointment could cause a drop.'}
+        {'title': 'Profit-Taking Risk', 'reason': 'High RSI suggests a pullback as investors lock in gains.'},
+        {'title': 'Overextended Technicals', 'reason': 'The price has moved very far, very fast, risking a reversal.'},
+        {'title': 'High Expectations', 'reason': 'Stock is priced for perfection; any disappointment could cause a drop.'}
     ]
-    import random
     return random.choice(notes)
 
 def get_dynamic_tickers():
@@ -46,11 +53,11 @@ def get_dynamic_tickers():
         soup = BeautifulSoup(response.text, 'html.parser')
         table = soup.find('table', {'class': 'W(100%)'})
         tickers = [link.text for link in table.find_all('a', {'data-test': 'quoteLink'})[:25]]
-        if not tickers: raise ValueError("Could not find any tickers.")
+        if not tickers: raise ValueError("Could not find any tickers from scraping.")
         logging.info(f"Dynamically fetched most active tickers: {tickers}")
         return tickers
     except Exception as e:
-        logging.error(f"Failed to scrape tickers: {e}")
+        logging.error(f"Failed to scrape tickers, using fallback list: {e}")
         return ['NVDA', 'TSLA', 'AAPL', 'SMCI', 'AVGO', 'GME', 'PLTR', 'AMD', 'LLY', 'DELL']
 
 # --- Market Status Endpoint ---
@@ -71,9 +78,17 @@ def get_market_status():
         logging.error(f"Could not fetch market status: {e}")
         return jsonify({"status": "Market status is currently unavailable", "time": ""}), 500
 
-# --- Main API Endpoint ---
+# --- Main API Endpoint (with Caching) ---
 @app.route('/api/top-gainers')
 def get_top_gainers_data():
+    global api_cache
+
+    if api_cache["data"] and datetime.utcnow() - api_cache["last_updated"] < CACHE_DURATION:
+        logging.info("Returning data from cache.")
+        return jsonify(api_cache["data"])
+
+    logging.info("Cache is stale or empty. Fetching new data.")
+    
     try:
         active_tickers = get_dynamic_tickers()
         tickers = yf.Tickers(' '.join(active_tickers))
@@ -85,22 +100,21 @@ def get_top_gainers_data():
                 hist = tickers.tickers[symbol].history(period="3mo")
                 if hist.empty: continue
 
-                # --- NEW ACCURACY LOGIC ---
                 market_state = info.get('marketState', 'UNKNOWN').upper()
                 price_type = "REGULAR"
                 
-                # Base values from the regular session
                 regular_price = info.get('regularMarketPrice', info.get('currentPrice', 0))
                 prev_close = info.get('previousClose', 1)
                 
-                # Main change is always based on the regular session
                 change = regular_price - prev_close
-                if change <= 0: continue # Only process gainers
+                
+                # --- THIS LINE IS NOW COMMENTED OUT FOR DEBUGGING ---
+                # if change <= 0: continue 
+                
                 change_percent = (change / prev_close) * 100 if prev_close else 0
 
-                # Determine the final price to display and calculate market-specific change
                 display_price = regular_price
-                market_change_str = "" # Extra string for pre/post market changes
+                market_change_str = ""
 
                 if market_state in ["PRE", "PREPRE"] and 'preMarketPrice' in info and info['preMarketPrice']:
                     display_price = info['preMarketPrice']
@@ -126,7 +140,7 @@ def get_top_gainers_data():
                     "ticker": symbol,
                     "price": f"{display_price:.2f}",
                     "priceType": price_type,
-                    "marketChangeStr": market_change_str, # New field for market-specific change
+                    "marketChangeStr": market_change_str,
                     "change": f"{change:+.2f}",
                     "changePercent": f"{change_percent:+.2f}%",
                     "ohl": f"{info.get('open', 0):.2f}/{info.get('dayHigh', 0):.2f}/{info.get('dayLow', 0):.2f}",
@@ -144,12 +158,20 @@ def get_top_gainers_data():
             except Exception as e:
                 logging.error(f"Could not process data for {symbol}: {e}")
         
-        top_10_gainers = sorted(all_data, key=lambda x: float(x['change']), reverse=True)[:10]
-        return jsonify(top_10_gainers)
+        # This will now sort ALL active stocks (gainers and losers) and return the top 10 by 'change'
+        top_10_stocks = sorted(all_data, key=lambda x: float(x['change']), reverse=True)[:10]
+
+        api_cache["data"] = top_10_stocks
+        api_cache["last_updated"] = datetime.utcnow()
+
+        return jsonify(top_10_stocks)
 
     except Exception as e:
         logging.error(f"An error occurred in get_top_gainers_data: {e}")
-        return jsonify({"error": "Could not fetch data from Yahoo Finance."}), 500
+        if api_cache["data"]:
+            logging.warning("Returning stale data due to an error.")
+            return jsonify(api_cache["data"])
+        return jsonify({"error": "Could not fetch data and no cache is available."}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
