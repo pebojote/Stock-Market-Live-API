@@ -17,8 +17,7 @@ CORS(app)
 API_KEY = os.getenv("POLYGON_API_KEY")
 if not API_KEY:
     logging.error("FATAL: POLYGON_API_KEY environment variable not set.")
-    # You can raise an exception here or handle it gracefully
-    # For now, we'll let it fail later so the logs are clear.
+    # This will cause the app to fail gracefully if the key is missing.
 
 # Initialize the Polygon client
 client = RESTClient(API_KEY)
@@ -41,13 +40,14 @@ def format_volume(volume):
     except (ValueError, TypeError):
         return "N/A"
 
-# --- Market Status Endpoint (Also updated to use Polygon) ---
+# --- Market Status Endpoint ---
 @app.route('/api/market-status')
 def get_market_status():
+    if not API_KEY:
+        return jsonify({"status": "API key not configured", "time": ""}), 500
     try:
-        # Get the market status for US stocks
         market_status = client.get_market_status()
-        status_description = market_status.market.upper() # e.g., 'OPEN', 'CLOSED'
+        status_description = market_status.market.upper()
         
         est = pytz.timezone('US/Eastern')
         current_time_est = datetime.now(est).strftime('%I:%M:%S %p EST')
@@ -71,12 +71,11 @@ def get_top_gainers_data():
         return jsonify({"error": "API key is not configured on the server."}), 500
         
     try:
-        # --- NEW EFFICIENT API CALL ---
-        # This makes ONE single, reliable call to get all top gainers.
-        gainers = client.get_snapshot_gainers_losers(direction="gainers")
+        # --- CORRECTED FUNCTION NAME ---
+        # The function is called 'list_snapshot_gainers_losers', not 'get...'.
+        gainers = client.list_snapshot_gainers_losers(direction="gainers")
 
         all_data = []
-        # The 'tickers' attribute might not exist if there are no gainers
         if hasattr(gainers, 'tickers') and gainers.tickers:
             for stock in gainers.tickers:
                 stock_data = {
@@ -85,7 +84,6 @@ def get_top_gainers_data():
                     "change": f"{stock.todays_change:+.2f}",
                     "changePercent": f"{stock.todays_change_percent:+.2f}%",
                     "volume": format_volume(stock.day.volume),
-                    # RSI and Rank are not provided by this endpoint, so we simplify the data model
                     "rsi": "N/A", 
                     "rank": "N/A"
                 }
@@ -100,14 +98,10 @@ def get_top_gainers_data():
     except Exception as e:
         logging.error(f"A major error occurred: {e}")
         logging.error(traceback.format_exc())
-        if api_cache["data"]: # Return stale data if available
+        if api_cache["data"]:
             return jsonify(api_cache["data"])
         return jsonify({"error": "Could not fetch data from Polygon.io."}), 500
 
 if __name__ == '__main__':
-    # For local testing, you would need to set the environment variable.
-    # For example, in your terminal before running:
-    # export POLYGON_API_KEY='your_key_here' (macOS/Linux)
-    # $env:POLYGON_API_KEY='your_key_here' (Windows PowerShell)
     app.run(debug=True, port=5000)
 
