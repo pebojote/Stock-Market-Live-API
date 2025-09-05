@@ -22,7 +22,7 @@ api_cache = {
 }
 CACHE_DURATION = timedelta(minutes=5)
 
-# --- Helper Functions ---
+# --- Helper Functions (No Changes Here) ---
 
 def format_volume(volume):
     if volume is None: return "N/A"
@@ -48,7 +48,7 @@ def get_dynamic_tickers():
     try:
         url = "https://finance.yahoo.com/most-active"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         table = soup.find('table', {'class': 'W(100%)'})
@@ -60,7 +60,7 @@ def get_dynamic_tickers():
         logging.error(f"Failed to scrape tickers, using fallback list: {e}")
         return ['NVDA', 'TSLA', 'AAPL', 'SMCI', 'AVGO', 'GME', 'PLTR', 'AMD', 'LLY', 'DELL']
 
-# --- Market Status Endpoint ---
+# --- Market Status Endpoint (No Changes Here) ---
 @app.route('/api/market-status')
 def get_market_status():
     try:
@@ -78,7 +78,7 @@ def get_market_status():
         logging.error(f"Could not fetch market status: {e}")
         return jsonify({"status": "Market status is currently unavailable", "time": ""}), 500
 
-# --- Main API Endpoint (with Caching) ---
+# --- Main API Endpoint (Now with Improved Logging and Resilience) ---
 @app.route('/api/top-gainers')
 def get_top_gainers_data():
     global api_cache
@@ -91,38 +91,50 @@ def get_top_gainers_data():
     
     try:
         active_tickers = get_dynamic_tickers()
-        tickers = yf.Tickers(' '.join(active_tickers))
         all_data = []
 
         for symbol in active_tickers:
             try:
-                info = tickers.tickers[symbol].info
-                hist = tickers.tickers[symbol].history(period="3mo")
-                if hist.empty: continue
+                # --- NEW: More detailed logging ---
+                logging.info(f"--- Processing symbol: {symbol} ---")
+                
+                # --- NEW: Fetch data individually for better error isolation ---
+                ticker_obj = yf.Ticker(symbol)
+                
+                info = ticker_obj.info
+                # --- NEW: Check if the info dictionary is valid and has price data ---
+                if not info or 'regularMarketPrice' not in info or info.get('regularMarketPrice') is None:
+                    logging.warning(f"Skipping {symbol}: Missing critical price data in '.info'.")
+                    continue
+
+                hist = ticker_obj.history(period="3mo")
+                if hist.empty:
+                    logging.warning(f"Skipping {symbol}: History data was empty.")
+                    continue
 
                 market_state = info.get('marketState', 'UNKNOWN').upper()
                 price_type = "REGULAR"
                 
-                regular_price = info.get('regularMarketPrice', info.get('currentPrice', 0))
+                regular_price = info.get('regularMarketPrice', 0)
                 prev_close = info.get('previousClose', 1)
                 
                 change = regular_price - prev_close
                 
-                # --- THIS LINE IS NOW COMMENTED OUT FOR DEBUGGING ---
-                # if change <= 0: continue 
+                # We will keep the filter disabled for now to see all data
+                # if change <= 0: continue
                 
                 change_percent = (change / prev_close) * 100 if prev_close else 0
 
                 display_price = regular_price
                 market_change_str = ""
 
-                if market_state in ["PRE", "PREPRE"] and 'preMarketPrice' in info and info['preMarketPrice']:
+                if market_state in ["PRE", "PREPRE"] and info.get('preMarketPrice'):
                     display_price = info['preMarketPrice']
                     price_type = "PRE"
                     pre_market_change = display_price - regular_price
                     pre_market_percent = (pre_market_change / regular_price) * 100 if regular_price else 0
                     market_change_str = f" ({pre_market_change:+.2f}, {pre_market_percent:+.2f}%)"
-                elif market_state in ["POST", "POSTPOST", "CLOSED"] and 'postMarketPrice' in info and info['postMarketPrice']:
+                elif market_state in ["POST", "POSTPOST", "CLOSED"] and info.get('postMarketPrice'):
                     display_price = info['postMarketPrice']
                     price_type = "POST"
                     post_market_change = display_price - regular_price
@@ -155,10 +167,11 @@ def get_top_gainers_data():
                     "profitTarget": f"{(regular_price + (2 * latest.get('ATRr_14', 0))):.2f} - {(regular_price + (3 * latest.get('ATRr_14', 0))):.2f}"
                 }
                 all_data.append(stock_data)
+                logging.info(f"Successfully processed and added {symbol}.") # NEW
             except Exception as e:
-                logging.error(f"Could not process data for {symbol}: {e}")
+                logging.error(f"An unexpected error occurred for {symbol}: {e}")
         
-        # This will now sort ALL active stocks (gainers and losers) and return the top 10 by 'change'
+        logging.info(f"Finished processing. Found {len(all_data)} stocks to return.") # NEW
         top_10_stocks = sorted(all_data, key=lambda x: float(x['change']), reverse=True)[:10]
 
         api_cache["data"] = top_10_stocks
@@ -167,9 +180,9 @@ def get_top_gainers_data():
         return jsonify(top_10_stocks)
 
     except Exception as e:
-        logging.error(f"An error occurred in get_top_gainers_data: {e}")
+        logging.error(f"A critical error occurred in get_top_gainers_data: {e}")
         if api_cache["data"]:
-            logging.warning("Returning stale data due to an error.")
+            logging.warning("Returning stale data due to a critical error.")
             return jsonify(api_cache["data"])
         return jsonify({"error": "Could not fetch data and no cache is available."}), 500
 
