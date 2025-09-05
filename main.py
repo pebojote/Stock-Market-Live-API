@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import pytz
 import random
+import time
 
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +32,7 @@ def format_volume(volume):
     return str(volume)
 
 def get_rank(rsi):
+    if rsi is None: return 'N/A'
     if rsi > 75: return 'Excellent'
     if rsi > 65: return 'Very Good'
     if rsi > 55: return 'Good'
@@ -78,7 +80,7 @@ def get_market_status():
         logging.error(f"Could not fetch market status: {e}")
         return jsonify({"status": "Market status is currently unavailable", "time": ""}), 500
 
-# --- Main API Endpoint (Now with Improved Logging and Resilience) ---
+# --- Main API Endpoint (Now with Defensive Data Handling) ---
 @app.route('/api/top-gainers')
 def get_top_gainers_data():
     global api_cache
@@ -95,15 +97,14 @@ def get_top_gainers_data():
 
         for symbol in active_tickers:
             try:
-                # --- NEW: More detailed logging ---
                 logging.info(f"--- Processing symbol: {symbol} ---")
                 
-                # --- NEW: Fetch data individually for better error isolation ---
                 ticker_obj = yf.Ticker(symbol)
-                
                 info = ticker_obj.info
-                # --- NEW: Check if the info dictionary is valid and has price data ---
-                if not info or 'regularMarketPrice' not in info or info.get('regularMarketPrice') is None:
+                
+                regular_price = info.get('regularMarketPrice') or info.get('currentPrice') or info.get('previousClose')
+                
+                if not info or not regular_price:
                     logging.warning(f"Skipping {symbol}: Missing critical price data in '.info'.")
                     continue
 
@@ -115,14 +116,8 @@ def get_top_gainers_data():
                 market_state = info.get('marketState', 'UNKNOWN').upper()
                 price_type = "REGULAR"
                 
-                regular_price = info.get('regularMarketPrice', 0)
                 prev_close = info.get('previousClose', 1)
-                
                 change = regular_price - prev_close
-                
-                # We will keep the filter disabled for now to see all data
-                # if change <= 0: continue
-                
                 change_percent = (change / prev_close) * 100 if prev_close else 0
 
                 display_price = regular_price
@@ -147,6 +142,13 @@ def get_top_gainers_data():
                 hist.ta.macd(fast=12, slow=26, signal=9, append=True)
                 hist.ta.atr(length=14, append=True)
                 latest = hist.iloc[-1]
+
+                # --- NEW: Safely get all technical indicator values ---
+                rsi = latest.get('RSI_14')
+                macd_hist = latest.get('MACDh_12_26_9')
+                ema_10 = latest.get('EMA_10')
+                ema_50 = latest.get('EMA_50')
+                atr = latest.get('ATRr_14')
                 
                 stock_data = {
                     "ticker": symbol,
@@ -157,21 +159,24 @@ def get_top_gainers_data():
                     "changePercent": f"{change_percent:+.2f}%",
                     "ohl": f"{info.get('open', 0):.2f}/{info.get('dayHigh', 0):.2f}/{info.get('dayLow', 0):.2f}",
                     "volume": format_volume(info.get('volume', 0)),
-                    "rsi": f"{latest.get('RSI_14', 0):.2f}",
-                    "macdHist": f"{latest.get('MACDh_12_26_9', 0):.2f}",
-                    "ema_10_50": f"{latest.get('EMA_10', 0):.2f} / {latest.get('EMA_50', 0):.2f}",
-                    "rank": get_rank(latest.get('RSI_14', 0)),
-                    "action": "Consider" if get_rank(latest.get('RSI_14', 0)) in ['Good', 'Fair'] else "Watch",
+                    # --- NEW: Check each value before formatting to prevent crashes ---
+                    "rsi": f"{rsi:.2f}" if rsi is not None else "N/A",
+                    "macdHist": f"{macd_hist:.2f}" if macd_hist is not None else "N/A",
+                    "ema_10_50": f"{ema_10:.2f} / {ema_50:.2f}" if ema_10 is not None and ema_50 is not None else "N/A",
+                    "rank": get_rank(rsi),
+                    "action": "Consider" if get_rank(rsi) in ['Good', 'Fair'] else "Watch",
                     "riskNotes": get_risk_note(),
-                    "atrStop": f"{(regular_price - (2 * latest.get('ATRr_14', 0))):.2f}",
-                    "profitTarget": f"{(regular_price + (2 * latest.get('ATRr_14', 0))):.2f} - {(regular_price + (3 * latest.get('ATRr_14', 0))):.2f}"
+                    "atrStop": f"{(regular_price - (2 * atr)):.2f}" if atr is not None else "N/A",
+                    "profitTarget": f"{(regular_price + (2 * atr)):.2f} - {(regular_price + (3 * atr)):.2f}" if atr is not None else "N/A"
                 }
                 all_data.append(stock_data)
-                logging.info(f"Successfully processed and added {symbol}.") # NEW
+                logging.info(f"Successfully processed and added {symbol}.")
             except Exception as e:
                 logging.error(f"An unexpected error occurred for {symbol}: {e}")
+            
+            time.sleep(0.5)
         
-        logging.info(f"Finished processing. Found {len(all_data)} stocks to return.") # NEW
+        logging.info(f"Finished processing. Found {len(all_data)} stocks to return.")
         top_10_stocks = sorted(all_data, key=lambda x: float(x['change']), reverse=True)[:10]
 
         api_cache["data"] = top_10_stocks
