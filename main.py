@@ -9,8 +9,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import pytz
 import random
-import time # Import the time module
-import traceback # Import traceback for detailed error logging
+import time
+import traceback
 
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +28,7 @@ CACHE_DURATION = timedelta(minutes=5)
 
 def safe_format_float(value):
     """Safely formats a value to a float string or returns 'N/A'."""
-    if value is None:
+    if value is None or pd.isna(value):
         return "N/A"
     try:
         return f"{float(value):.2f}"
@@ -36,7 +36,7 @@ def safe_format_float(value):
         return "N/A"
 
 def format_volume(volume):
-    if volume is None: return "N/A"
+    if volume is None or pd.isna(volume): return "N/A"
     try:
         volume = float(volume)
         if volume >= 1_000_000: return f"{volume / 1_000_000:.2f}M"
@@ -46,7 +46,7 @@ def format_volume(volume):
         return "N/A"
 
 def get_rank(rsi):
-    if rsi is None: return 'N/A'
+    if rsi is None or pd.isna(rsi): return 'N/A'
     try:
         rsi = float(rsi)
         if rsi > 75: return 'Excellent'
@@ -56,14 +56,6 @@ def get_rank(rsi):
     except (ValueError, TypeError):
         return 'N/A'
 
-def get_risk_note():
-    notes = [
-        {'title': 'Profit-Taking Risk', 'reason': 'High RSI suggests a pullback as investors lock in gains.'},
-        {'title': 'Overextended Technicals', 'reason': 'The price has moved very far, very fast, risking a reversal.'},
-        {'title': 'High Expectations', 'reason': 'Stock is priced for perfection; any disappointment could cause a drop.'}
-    ]
-    return random.choice(notes)
-
 def get_dynamic_tickers():
     try:
         url = "https://finance.yahoo.com/most-active"
@@ -72,7 +64,6 @@ def get_dynamic_tickers():
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         table = soup.find('table', {'class': 'W(100%)'})
-        # --- CHANGE: Fetch only 10 tickers to further reduce requests ---
         tickers = [link.text for link in table.find_all('a', {'data-test': 'quoteLink'})[:10]]
         if not tickers: raise ValueError("Could not find any tickers from scraping.")
         logging.info(f"Dynamically fetched {len(tickers)} most active tickers: {tickers}")
@@ -103,34 +94,40 @@ def get_market_status():
 @app.route('/api/top-gainers')
 def get_top_gainers_data():
     global api_cache
-
     if api_cache["data"] and datetime.utcnow() - api_cache["last_updated"] < CACHE_DURATION:
         logging.info("Returning data from cache.")
         return jsonify(api_cache["data"])
 
     logging.info("Cache is stale or empty. Fetching new data.")
-    
     try:
         active_tickers = get_dynamic_tickers()
+        if not active_tickers:
+            logging.error("Ticker list is empty.")
+            return jsonify([])
+
+        # --- NEW EFFICIENT BATCH DOWNLOAD ---
+        # This makes ONE network call for all tickers instead of 20+
+        data = yf.download(
+            tickers=active_tickers,
+            period="3mo",
+            group_by='ticker',
+            progress=False
+        )
+
         all_data = []
-
         for symbol in active_tickers:
-            logging.info(f"--- Processing symbol: {symbol} ---")
             try:
-                # Fetch data for a single ticker
-                ticker_data = yf.Ticker(symbol)
-                info = ticker_data.info
-                hist = ticker_data.history(period="3mo")
-
-                if hist.empty or not info or 'regularMarketPrice' not in info:
-                    logging.warning(f"Skipping {symbol}: History or info data was empty or invalid.")
+                hist = data[symbol]
+                if hist.empty or len(hist) < 2:
+                    logging.warning(f"Skipping {symbol}: Not enough history data.")
                     continue
 
-                regular_price = info.get('regularMarketPrice') or info.get('currentPrice') or info.get('previousClose')
-                prev_close = info.get('previousClose')
+                # Get latest and previous day's closing price from the history
+                regular_price = hist['Close'].iloc[-1]
+                prev_close = hist['Close'].iloc[-2]
 
-                if regular_price is None or prev_close is None:
-                    logging.warning(f"Skipping {symbol}: Missing critical price data.")
+                if pd.isna(regular_price) or pd.isna(prev_close):
+                    logging.warning(f"Skipping {symbol}: Price data contains NaN.")
                     continue
 
                 change = regular_price - prev_close
@@ -140,33 +137,25 @@ def get_top_gainers_data():
                 
                 change_percent = (change / prev_close) * 100
 
-                # --- Calculate indicators ---
-                hist.ta.ema(length=10, append=True)
-                hist.ta.ema(length=50, append=True)
+                # --- Calculate indicators on the historical data ---
                 hist.ta.rsi(length=14, append=True)
-                hist.ta.macd(fast=12, slow=26, signal=9, append=True)
-                hist.ta.atr(length=14, append=True)
-                latest = hist.iloc[-1]
+                latest_indicators = hist.iloc[-1]
                 
                 stock_data = {
                     "ticker": symbol,
-                    "price": safe_format_float(info.get('regularMarketPrice')),
+                    "price": safe_format_float(regular_price),
                     "change": f"{change:+.2f}",
                     "changePercent": f"{change_percent:+.2f}%",
-                    "volume": format_volume(info.get('volume')),
-                    "rsi": safe_format_float(latest.get('RSI_14')),
-                    "rank": get_rank(latest.get('RSI_14'))
+                    "volume": format_volume(hist['Volume'].iloc[-1]),
+                    "rsi": safe_format_float(latest_indicators.get('RSI_14')),
+                    "rank": get_rank(latest_indicators.get('RSI_14'))
                 }
                 all_data.append(stock_data)
                 logging.info(f"Successfully processed and added {symbol}.")
 
-            except Exception:
-                logging.error(f"An unexpected error occurred for {symbol}:")
-                logging.error(traceback.format_exc()) # Log the full error
-            
-            # --- IMPORTANT: Wait for 3 seconds to avoid being rate-limited ---
-            logging.info("Waiting for 3 seconds...")
-            time.sleep(3)
+            except Exception as inner_e:
+                logging.error(f"An unexpected error occurred for {symbol}: {inner_e}")
+                logging.error(traceback.format_exc())
         
         top_10_gainers = sorted(all_data, key=lambda x: float(x['change']), reverse=True)[:10]
 
@@ -174,8 +163,9 @@ def get_top_gainers_data():
         api_cache["last_updated"] = datetime.utcnow()
         return jsonify(top_10_gainers)
 
-    except Exception as e:
-        logging.error(f"A major error occurred in get_top_gainers_data: {e}")
+    except Exception as outer_e:
+        logging.error(f"A major error occurred in get_top_gainers_data: {outer_e}")
+        logging.error(traceback.format_exc())
         if api_cache["data"]:
             return jsonify(api_cache["data"])
         return jsonify({"error": "Could not fetch data and no cache is available."}), 500
