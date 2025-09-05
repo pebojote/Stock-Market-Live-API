@@ -1,9 +1,9 @@
 Flask
 Flask-Cors
-gunicorn
+waitress
 yfinance==0.2.38
 pandas==2.2.2
-pandas-ta==0.3.14b
+pandas-ta==0.3.14b0
 numpy<2.0
 requests
 beautifulsoup4
