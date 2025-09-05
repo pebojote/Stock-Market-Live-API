@@ -71,9 +71,9 @@ def get_top_gainers_data():
         return jsonify({"error": "API key is not configured on the server."}), 500
         
     try:
-        # --- CORRECTED FUNCTION NAME ---
-        # The function is called 'list_snapshot_gainers_losers', not 'get...'.
-        gainers = client.list_snapshot_gainers_losers(direction="gainers")
+        # --- CORRECTED FUNCTION NAME (FINAL) ---
+        # The correct function is called 'get_snapshot_direction'.
+        gainers = client.get_snapshot_direction(direction="gainers")
 
         all_data = []
         if hasattr(gainers, 'tickers') and gainers.tickers:
