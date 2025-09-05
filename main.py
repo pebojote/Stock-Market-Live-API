@@ -72,9 +72,10 @@ def get_dynamic_tickers():
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         table = soup.find('table', {'class': 'W(100%)'})
-        tickers = [link.text for link in table.find_all('a', {'data-test': 'quoteLink'})[:25]]
+        # --- CHANGE: Fetch only 10 tickers to further reduce requests ---
+        tickers = [link.text for link in table.find_all('a', {'data-test': 'quoteLink'})[:10]]
         if not tickers: raise ValueError("Could not find any tickers from scraping.")
-        logging.info(f"Dynamically fetched most active tickers: {tickers}")
+        logging.info(f"Dynamically fetched {len(tickers)} most active tickers: {tickers}")
         return tickers
     except Exception as e:
         logging.error(f"Failed to scrape tickers, using fallback list: {e}")
@@ -163,9 +164,9 @@ def get_top_gainers_data():
                 logging.error(f"An unexpected error occurred for {symbol}:")
                 logging.error(traceback.format_exc()) # Log the full error
             
-            # --- IMPORTANT: Wait for 1 second to avoid being rate-limited ---
-            logging.info("Waiting for 1 second...")
-            time.sleep(1)
+            # --- IMPORTANT: Wait for 3 seconds to avoid being rate-limited ---
+            logging.info("Waiting for 3 seconds...")
+            time.sleep(3)
         
         top_10_gainers = sorted(all_data, key=lambda x: float(x['change']), reverse=True)[:10]
 
