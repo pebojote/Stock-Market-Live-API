@@ -37,12 +37,12 @@ def get_gemini_analysis():
     current_date = datetime.now(est).strftime('%Y-%m-%d')
     
     system_prompt = """
-    You are an expert financial analyst. Your task is to provide a detailed, real-time analysis for the top 10 trending day-gainer stocks in a structured format.
-    You MUST use Google Search to get the latest, most accurate data for the current trading day.
-    First, find the top 100 day gainers from the DOW, Nasdaq, and S&P 500.
-    Then, for the TOP 10 of that list, provide the following details for each stock:
-    Ticker, Price, Change, O/H/L, Volume, RSI (14), MACD HIST, EMA (10/50), Rank (Poor, Fair, Good, Very Good, Excellent), Action (Buy/Hold/Sell with target), a primary Risk Note with a brief reason, ATR Stop, and a Profit Target Zone.
-    Format your entire response as a single JSON array of objects. Do not include any text outside of the JSON array.
+    You are a financial data API. Your task is to provide a detailed, real-time analysis for the top 10 trending day-gainer stocks.
+    - You MUST use Google Search to get the latest, most accurate data for the current trading day.
+    - First, find the top 100 day gainers from the DOW, Nasdaq, and S&P 500.
+    - Then, for the TOP 10 of that list, provide the following details for each stock: Ticker, Price, Change, O/H/L, Volume, RSI (14), MACD HIST, EMA (10/50), Rank (Poor, Fair, Good, Very Good, Excellent), Action (Buy/Hold/Sell with target), a primary Risk Note with a brief reason, ATR Stop, and a Profit Target Zone.
+    - Your entire response MUST be a single, valid JSON array of objects.
+    - Do NOT include any introductory text, concluding text, markdown formatting like ```json, or any other characters outside of the main JSON array. The response must be parsable JSON and nothing else.
     """
     
     user_prompt = f"Provide the top 10 stock gainer analysis for today, {current_date}."
@@ -52,9 +52,8 @@ def get_gemini_analysis():
         "contents": [{"parts": [{"text": user_prompt}]}],
         "tools": [{"google_search": {}}],
         "generationConfig": {
-            # NOTE: Temporarily removed the JSON schema for debugging.
-            # We are asking the model to format the JSON itself in the prompt.
-            "response_mime_type": "application/json",
+            # This is the fix: We are removing the unsupported "response_mime_type"
+            # and relying on the system prompt to ensure the output is valid JSON.
             "temperature": 0.5,
             "max_output_tokens": 8192,
         }
@@ -67,16 +66,15 @@ def get_gemini_analysis():
         response.raise_for_status()
         
         response_json = response.json()
+        # The text part of the response should now be a well-formatted JSON string
         json_string = response_json['candidates'][0]['content']['parts'][0]['text']
         
-        # The model should return a valid JSON string, which we parse here.
         return json.loads(json_string)
 
     except requests.exceptions.HTTPError as http_err:
         logging.error(f"HTTP error occurred: {http_err}")
-        # Log the full error response from the server for more details
         logging.error(f"Error Response Body: {http_err.response.text}")
-        raise # Re-raise the exception to be caught by the main handler
+        raise
 
 @app.route('/api/top-gainers')
 def get_top_gainers_data():
